@@ -40,12 +40,48 @@ final class ScratchTextView: NSTextView {
         .foregroundColor: NSColor.textColor,
     ]
 
+    // Dark purple ink in light mode; lifted to lavender in dark mode so the
+    // stroke stays visible against a dark background.
+    static let scratchColor = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(calibratedRed: 0.70, green: 0.55, blue: 0.95, alpha: 1)
+            : NSColor(calibratedRed: 0.36, green: 0.14, blue: 0.55, alpha: 1)
+    }
+
+    static let scratchAttributes: [NSAttributedString.Key: Any] = [
+        .strikethroughStyle: NSUnderlineStyle.thick.rawValue,
+        .strikethroughColor: scratchColor,
+        .foregroundColor: NSColor.secondaryLabelColor,
+    ]
+
+    /// Called after a word is scratched out (attribute changes don't fire
+    /// text-change notifications, so autosave hooks in here).
+    var onScratch: (() -> Void)?
+
+    // 66 characters per line — the typographic ideal (Bringhurst's 45-75
+    // range; WCAG caps at 80). Measured in the actual font rather than
+    // hardcoded in points.
+    static let maxLineWidth: CGFloat = {
+        let charWidth = ("n" as NSString).size(withAttributes: baseAttributes).width
+        return ceil(charWidth * 66)
+    }()
+
     // Typing attributes normally inherit from the character before the
     // insertion point; pin them so text typed after a struck word doesn't
-    // come out struck too.
+    // come out struck too. The setter must write through to super (not
+    // no-op) — the empty-document caret takes its height from the internal
+    // storage, so it has to actually hold the 17pt base font.
     override var typingAttributes: [NSAttributedString.Key: Any] {
         get { Self.baseAttributes }
-        set {}
+        set { super.typingAttributes = Self.baseAttributes }
+    }
+
+    // Keep the text column centered and capped at maxLineWidth by growing
+    // the horizontal inset as the window widens.
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        let horizontal = max(48, (newSize.width - Self.maxLineWidth) / 2)
+        textContainerInset = NSSize(width: horizontal, height: 40)
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -72,10 +108,31 @@ final class ScratchTextView: NSTextView {
         let word = (storage.string as NSString).substring(with: wordRange)
         guard word.rangeOfCharacter(from: CharacterSet.whitespacesAndNewlines.inverted) != nil else { return }
 
-        storage.addAttributes([
-            .strikethroughStyle: NSUnderlineStyle.single.rawValue,
-            .strikethroughColor: NSColor.secondaryLabelColor,
-        ], range: wordRange)
+        storage.addAttributes(Self.scratchAttributes, range: wordRange)
+        onScratch?()
+    }
+
+    /// Inverse of `markdown`: rebuilds the page from saved text, restoring
+    /// ~~struck~~ ranges as scratch-outs.
+    static func attributedString(fromMarkdown text: String) -> NSAttributedString {
+        let result = NSMutableAttributedString()
+        let ns = text as NSString
+        let struckAttrs = baseAttributes.merging(scratchAttributes) { _, new in new }
+        let regex = try! NSRegularExpression(pattern: "~~([^~\\n]+)~~")
+        var cursor = 0
+        regex.enumerateMatches(in: text, range: NSRange(location: 0, length: ns.length)) { match, _, _ in
+            guard let match else { return }
+            if match.range.location > cursor {
+                let before = NSRange(location: cursor, length: match.range.location - cursor)
+                result.append(NSAttributedString(string: ns.substring(with: before), attributes: baseAttributes))
+            }
+            result.append(NSAttributedString(string: ns.substring(with: match.range(at: 1)), attributes: struckAttrs))
+            cursor = match.range.location + match.range.length
+        }
+        if cursor < ns.length {
+            result.append(NSAttributedString(string: ns.substring(from: cursor), attributes: baseAttributes))
+        }
+        return result
     }
 
     /// The document as markdown: struck ranges become ~~strikethrough~~.
@@ -118,6 +175,9 @@ func makeTextView() -> (scrollView: NSScrollView, textView: ScratchTextView) {
     textView.textContainerInset = NSSize(width: 48, height: 40)
 
     textView.font = ScratchTextView.baseAttributes[.font] as? NSFont
+    // Seed the internal typing attributes so the caret is full-height
+    // from the first launch, before any text exists.
+    textView.typingAttributes = ScratchTextView.baseAttributes
     textView.isRichText = false
     textView.allowsUndo = false
 
@@ -143,11 +203,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow!
     var textView: ScratchTextView!
     let forwardOnly = ForwardOnlyDelegate()
+    private var pendingSave: DispatchWorkItem?
+
+    /// The single active page, mirrored to disk for crash/quit recovery.
+    static let pageURL: URL = {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Writer", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("current-page.md")
+    }()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let (scrollView, textView) = makeTextView()
         self.textView = textView
         textView.delegate = forwardOnly
+
+        // Restore the page from the last session, if there is one.
+        if let saved = try? String(contentsOf: Self.pageURL, encoding: .utf8), !saved.isEmpty {
+            textView.textStorage?.setAttributedString(ScratchTextView.attributedString(fromMarkdown: saved))
+            textView.setSelectedRange(NSRange(location: textView.textStorage?.length ?? 0, length: 0))
+        }
+
+        // Autosave shortly after typing pauses, and after scratch-outs.
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(textDidChange(_:)),
+            name: NSText.didChangeNotification, object: textView
+        )
+        textView.onScratch = { [weak self] in self?.scheduleAutosave() }
 
         window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 820, height: 620),
@@ -169,21 +251,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         true
     }
 
-    // MARK: New Page (Cmd+N)
+    func applicationWillTerminate(_ notification: Notification) {
+        savePageNow()
+    }
 
-    @objc func newPage(_ sender: Any?) {
+    // MARK: Autosave
+
+    @objc private func textDidChange(_ notification: Notification) {
+        scheduleAutosave()
+    }
+
+    private func scheduleAutosave() {
+        pendingSave?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.savePageNow() }
+        pendingSave = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: work)
+    }
+
+    private func savePageNow() {
+        pendingSave?.cancel()
+        pendingSave = nil
+        let text = textView.markdown
+        if text.isEmpty {
+            try? FileManager.default.removeItem(at: Self.pageURL)
+        } else {
+            try? text.write(to: Self.pageURL, atomically: true, encoding: .utf8)
+        }
+    }
+
+    // MARK: Clear Page (Cmd+N)
+
+    @objc func clearPage(_ sender: Any?) {
         guard !textView.string.isEmpty else { return }
 
         let alert = NSAlert()
-        alert.messageText = "Start a new page?"
-        alert.informativeText = "The current page will be discarded. Save it first if you want to keep it."
-        alert.addButton(withTitle: "New Page")
+        alert.messageText = "Clear the page?"
+        alert.informativeText = "Everything on the page will be erased. Save it first if you want to keep it."
+        alert.addButton(withTitle: "Clear Page")
         alert.addButton(withTitle: "Cancel")
         alert.beginSheetModal(for: window) { [weak self] response in
             guard response == .alertFirstButtonReturn, let self else { return }
             // Direct storage assignment bypasses the forward-only delegate,
             // so the app can clear the page even though the user can't.
             self.textView.string = ""
+            self.savePageNow() // empty page — removes the stored copy too
             self.window.makeFirstResponder(self.textView)
         }
     }
@@ -192,8 +303,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func saveDocument(_ sender: Any?) {
         let markdown = UTType(filenameExtension: "md") ?? .plainText
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH.mm"
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = "writing.md"
+        panel.nameFieldStringValue = formatter.string(from: Date()) + ".md"
         panel.allowedContentTypes = [markdown]
         panel.beginSheetModal(for: window) { [weak self] response in
             guard response == .OK, let url = panel.url, let text = self?.textView.markdown else { return }
@@ -215,7 +328,7 @@ func makeMainMenu() -> NSMenu {
 
     let fileMenuItem = NSMenuItem()
     let fileMenu = NSMenu(title: "File")
-    fileMenu.addItem(withTitle: "New Page", action: #selector(AppDelegate.newPage(_:)), keyEquivalent: "n")
+    fileMenu.addItem(withTitle: "Clear Page", action: #selector(AppDelegate.clearPage(_:)), keyEquivalent: "n")
     fileMenu.addItem(withTitle: "Save…", action: #selector(AppDelegate.saveDocument(_:)), keyEquivalent: "s")
     fileMenuItem.submenu = fileMenu
     mainMenu.addItem(fileMenuItem)
