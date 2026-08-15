@@ -14,12 +14,15 @@ a word on paper.
 - Paste and dictation work, and can only append.
 - Double-click a word to scratch it out. There is no un-scratching.
 - Select and copy freely; you just can't change what's written.
+- The page autosaves continuously and reopens where you left off, even
+  after a crash or reboot. There is only ever one page — clearing it
+  erases the stored copy too.
 
 ## Keys
 
 | Key | Action |
 | --- | --- |
-| Cmd+N | New page (confirms first if the page has text) |
+| Cmd+N | Clear page (confirms first if the page has text) |
 | Cmd+S | Save as markdown (scratch-outs export as `~~strikethrough~~`) |
 | Cmd+C / Cmd+V / Cmd+A | Copy / paste / select all |
 | Cmd+Q | Quit |
