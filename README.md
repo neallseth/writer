@@ -17,6 +17,8 @@ a word on paper.
 - The page autosaves continuously and reopens where you left off, even
   after a crash or reboot. There is only ever one page — clearing it
   erases the stored copy too.
+- Two themes under View ▸ Theme: System (follows macOS light/dark) and
+  Natural (warm paper and ink, like a notebook).
 
 ## Keys
 
