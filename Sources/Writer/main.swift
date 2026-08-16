@@ -30,29 +30,73 @@ final class ForwardOnlyDelegate: NSObject, NSTextViewDelegate {
     }
 }
 
+// MARK: - Themes
+
+/// "System" follows macOS light/dark with standard colors. "Natural" is a
+/// warm paper-and-ink look, like writing in a notebook.
+enum Theme: String {
+    case system, natural
+
+    var background: NSColor {
+        self == .natural
+            ? NSColor(calibratedRed: 0.96, green: 0.925, blue: 0.85, alpha: 1)
+            : .textBackgroundColor
+    }
+    /// The area outside the page when the window is wider than the text
+    /// column. Natural frames the sepia page with a lighter cream; System
+    /// uses the standard darker under-page color (light mode's page is
+    /// already white — there's no lighter shade to frame it with).
+    var gutter: NSColor {
+        self == .natural
+            ? NSColor(calibratedRed: 0.995, green: 0.985, blue: 0.955, alpha: 1)
+            : .underPageBackgroundColor
+    }
+    var ink: NSColor {
+        self == .natural
+            ? NSColor(calibratedRed: 0.24, green: 0.19, blue: 0.13, alpha: 1)
+            : .textColor
+    }
+    var dimInk: NSColor {
+        self == .natural
+            ? NSColor(calibratedRed: 0.60, green: 0.53, blue: 0.44, alpha: 1)
+            : .secondaryLabelColor
+    }
+    var caret: NSColor {
+        self == .natural
+            ? NSColor(calibratedRed: 0.85, green: 0.52, blue: 0.13, alpha: 1)
+            : .textColor
+    }
+}
+
 // MARK: - Scratch-out text view
 
 /// Double-clicking a word crosses it out — permanently, like ink.
 final class ScratchTextView: NSTextView {
 
-    static let baseAttributes: [NSAttributedString.Key: Any] = [
-        .font: NSFont.monospacedSystemFont(ofSize: 17, weight: .regular),
-        .foregroundColor: NSColor.textColor,
-    ]
+    static var currentTheme = Theme(rawValue: UserDefaults.standard.string(forKey: "theme") ?? "") ?? .system
 
-    // Dark purple ink in light mode; lifted to lavender in dark mode so the
-    // stroke stays visible against a dark background.
-    static let scratchColor = NSColor(name: nil) { appearance in
-        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            ? NSColor(calibratedRed: 0.70, green: 0.55, blue: 0.95, alpha: 1)
-            : NSColor(calibratedRed: 0.36, green: 0.14, blue: 0.55, alpha: 1)
+    static var baseAttributes: [NSAttributedString.Key: Any] {
+        [
+            .font: NSFont.monospacedSystemFont(ofSize: 17, weight: .regular),
+            .foregroundColor: currentTheme.ink,
+        ]
     }
 
-    static let scratchAttributes: [NSAttributedString.Key: Any] = [
-        .strikethroughStyle: NSUnderlineStyle.thick.rawValue,
-        .strikethroughColor: scratchColor,
-        .foregroundColor: NSColor.secondaryLabelColor,
-    ]
+    // Burnt-sienna ink, echoing the icon's scratch stroke; lifted to a
+    // warm clay in dark mode so it stays visible against a dark background.
+    static let scratchColor = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(calibratedRed: 0.74, green: 0.54, blue: 0.42, alpha: 1)
+            : NSColor(calibratedRed: 0.50, green: 0.31, blue: 0.21, alpha: 1)
+    }
+
+    static var scratchAttributes: [NSAttributedString.Key: Any] {
+        [
+            .strikethroughStyle: NSUnderlineStyle.thick.rawValue,
+            .strikethroughColor: scratchColor,
+            .foregroundColor: currentTheme.dimInk,
+        ]
+    }
 
     /// Called after a word is scratched out (attribute changes don't fire
     /// text-change notifications, so autosave hooks in here).
@@ -76,39 +120,135 @@ final class ScratchTextView: NSTextView {
         set { super.typingAttributes = Self.baseAttributes }
     }
 
+    /// Breathing room between the text column and the page edge.
+    static let pageMargin: CGFloat = 48
+
+    /// Whether the page is framed by gutters when the window is wide.
+    static var guttersEnabled = UserDefaults.standard.object(forKey: "gutters") as? Bool ?? true
+
     // Keep the text column centered and capped at maxLineWidth by growing
-    // the horizontal inset as the window widens.
+    // the horizontal inset as the window widens. The height is clamped to
+    // the viewport here, in the setter itself — NSTextView's internal
+    // sizing passes reset frame and minSize on their own schedule, and a
+    // view even a few points shorter than the clip view lets the gutter
+    // fill bleed into the uncovered strip as a band along the bottom.
     override func setFrameSize(_ newSize: NSSize) {
+        var newSize = newSize
+        if let clipHeight = superview?.bounds.height {
+            newSize.height = max(newSize.height, ceil(clipHeight))
+        }
         super.setFrameSize(newSize)
-        let horizontal = max(48, (newSize.width - Self.maxLineWidth) / 2)
+        let horizontal = max(Self.pageMargin, (newSize.width - Self.maxLineWidth) / 2)
         textContainerInset = NSSize(width: horizontal, height: 40)
     }
 
-    override func mouseDown(with event: NSEvent) {
-        if event.clickCount == 2 {
-            scratchOutWord(at: event)
+    // Draw the page as its own surface: the text column plus margin sits
+    // on the theme's background color, and anything wider becomes gutter —
+    // like a notepad on a desk. (drawsBackground is off; this fills it all.)
+    override func draw(_ dirtyRect: NSRect) {
+        let theme = Self.currentTheme
+        guard Self.guttersEnabled else {
+            theme.background.setFill()
+            dirtyRect.fill()
+            super.draw(dirtyRect)
             return
         }
-        super.mouseDown(with: event)
+        theme.gutter.setFill()
+        dirtyRect.fill()
+
+        var page = bounds
+        let overhang = textContainerInset.width - Self.pageMargin
+        page.origin.x = overhang
+        page.size.width = bounds.width - 2 * overhang
+        theme.background.setFill()
+        page.intersection(dirtyRect).fill()
+
+        if overhang > 0 {
+            NSColor.separatorColor.setFill()
+            NSRect(x: page.minX - 1, y: dirtyRect.minY, width: 1, height: dirtyRect.height).fill()
+            NSRect(x: page.maxX, y: dirtyRect.minY, width: 1, height: dirtyRect.height).fill()
+        }
+
+        super.draw(dirtyRect)
     }
 
-    private func scratchOutWord(at event: NSEvent) {
-        guard let storage = textStorage else { return }
-        let point = convert(event.locationInWindow, from: nil)
-        let index = characterIndexForInsertion(at: point)
-        guard index < storage.length else { return }
+    // The caret only ever lives at the end of the document — clicks and
+    // arrow keys can't park it mid-text (typing there is redirected anyway).
+    // Ranged selections pass through untouched so select-to-copy still
+    // works, and intermediate (stillSelecting) updates are left alone so
+    // drag-selection tracking isn't disturbed.
+    override func setSelectedRanges(_ ranges: [NSValue], affinity: NSSelectionAffinity, stillSelecting: Bool) {
+        var ranges = ranges
+        if !stillSelecting,
+           ranges.count == 1,
+           let range = ranges.first?.rangeValue,
+           range.length == 0,
+           range.location != (textStorage?.length ?? 0) {
+            ranges = [NSValue(range: NSRange(location: textStorage?.length ?? 0, length: 0))]
+        }
+        super.setSelectedRanges(ranges, affinity: affinity, stillSelecting: stillSelecting)
+    }
 
-        let wordRange = selectionRange(
+    override func mouseDown(with event: NSEvent) {
+        guard event.clickCount == 2 else {
+            super.mouseDown(with: event)
+            return
+        }
+
+        let start = convert(event.locationInWindow, from: nil)
+        guard let storage = textStorage,
+              let anchor = wordRange(at: start) else { return }
+
+        // Anything already struck before this gesture is committed ink —
+        // a retreating stroke must never lift it.
+        var preStruck = IndexSet()
+        storage.enumerateAttribute(.strikethroughStyle, in: NSRange(location: 0, length: storage.length)) { value, range, _ in
+            if ((value as? Int) ?? 0) != 0 { preStruck.insert(integersIn: Range(range)!) }
+        }
+
+        var stroke = anchor
+        scratch(anchor)
+
+        // Keep the pen down: the stroke is a live preview while dragging —
+        // it extends from the anchor word through neighboring words and
+        // retreats (un-scratching) when dragged back. Release commits it.
+        while let next = window?.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]),
+              next.type == .leftMouseDragged {
+            autoscroll(with: next)
+            let point = convert(next.locationInWindow, from: nil)
+            guard let current = wordRange(at: point) else { continue }
+            let lower = min(anchor.location, current.location)
+            let upper = max(anchor.location + anchor.length, current.location + current.length)
+            let newStroke = NSRange(location: lower, length: upper - lower)
+
+            let lifted = IndexSet(integersIn: Range(stroke)!)
+                .subtracting(IndexSet(integersIn: Range(newStroke)!))
+                .subtracting(preStruck)
+            for gap in lifted.rangeView {
+                storage.setAttributes(Self.baseAttributes, range: NSRange(gap))
+            }
+            scratch(newStroke)
+            stroke = newStroke
+        }
+    }
+
+    /// The word under the given point, or nil over whitespace or past the end.
+    private func wordRange(at point: NSPoint) -> NSRange? {
+        guard let storage = textStorage else { return nil }
+        let index = characterIndexForInsertion(at: point)
+        guard index < storage.length else { return nil }
+        let range = selectionRange(
             forProposedRange: NSRange(location: index, length: 0),
             granularity: .selectByWord
         )
-        guard wordRange.length > 0 else { return }
+        guard range.length > 0 else { return nil }
+        let word = (storage.string as NSString).substring(with: range)
+        guard word.rangeOfCharacter(from: CharacterSet.whitespacesAndNewlines.inverted) != nil else { return nil }
+        return range
+    }
 
-        // Ignore double-clicks on whitespace between words.
-        let word = (storage.string as NSString).substring(with: wordRange)
-        guard word.rangeOfCharacter(from: CharacterSet.whitespacesAndNewlines.inverted) != nil else { return }
-
-        storage.addAttributes(Self.scratchAttributes, range: wordRange)
+    private func scratch(_ range: NSRange) {
+        textStorage?.addAttributes(Self.scratchAttributes, range: range)
         onScratch?()
     }
 
@@ -147,13 +287,16 @@ final class ScratchTextView: NSTextView {
                 result += chunk
                 return
             }
-            // Keep surrounding whitespace outside the markers — "~~word ~~"
-            // is not valid markdown strikethrough.
-            let leading = String(chunk.prefix(while: \.isWhitespace))
-            let trailingCount = chunk.reversed().prefix(while: \.isWhitespace).count
-            let core = String(chunk.dropFirst(leading.count).dropLast(trailingCount))
-            let trailing = String(chunk.suffix(trailingCount))
-            result += core.isEmpty ? chunk : leading + "~~" + core + "~~" + trailing
+            // Keep surrounding whitespace outside the markers ("~~word ~~"
+            // is not valid markdown), and close/reopen the markers at
+            // newlines since strikethrough can't span lines.
+            result += chunk.components(separatedBy: "\n").map { line -> String in
+                let leading = String(line.prefix(while: \.isWhitespace))
+                let trailingCount = line.reversed().prefix(while: \.isWhitespace).count
+                let core = String(line.dropFirst(leading.count).dropLast(trailingCount))
+                let trailing = String(line.suffix(trailingCount))
+                return core.isEmpty ? line : leading + "~~" + core + "~~" + trailing
+            }.joined(separator: "\n")
         }
         return result
     }
@@ -193,13 +336,34 @@ func makeTextView() -> (scrollView: NSScrollView, textView: ScratchTextView) {
     textView.isGrammarCheckingEnabled = false
     textView.smartInsertDeleteEnabled = false
 
+    // The view draws its own two-tone background (page + gutters).
+    textView.drawsBackground = false
+
+    // Keep the text view at least as tall as the viewport so the page
+    // surface always extends to the bottom of the window.
+    scrollView.contentView.postsFrameChangedNotifications = true
+    NotificationCenter.default.addObserver(
+        forName: NSView.frameDidChangeNotification,
+        object: scrollView.contentView, queue: .main
+    ) { [weak textView, weak scrollView] _ in
+        guard let textView, let scrollView else { return }
+        // Round up and resize immediately — waiting for the next layout
+        // pass leaves a sliver of scroll-view backing visible below the
+        // page after a window resize.
+        let height = ceil(scrollView.contentView.bounds.height)
+        textView.minSize = NSSize(width: 0, height: height)
+        if textView.frame.height < height {
+            textView.setFrameSize(NSSize(width: textView.frame.width, height: height))
+        }
+    }
+
     scrollView.documentView = textView
     return (scrollView, textView)
 }
 
 // MARK: - App delegate
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     var window: NSWindow!
     var textView: ScratchTextView!
     let forwardOnly = ForwardOnlyDelegate()
@@ -243,6 +407,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.setFrameAutosaveName("WriterMainWindow")
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(textView)
+        applyTheme(ScratchTextView.currentTheme)
 
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -253,6 +418,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         savePageNow()
+    }
+
+    // MARK: Themes
+
+    @objc func selectSystemTheme(_ sender: Any?) { applyTheme(.system) }
+    @objc func selectNaturalTheme(_ sender: Any?) { applyTheme(.natural) }
+
+    @objc func toggleGutters(_ sender: Any?) {
+        ScratchTextView.guttersEnabled.toggle()
+        UserDefaults.standard.set(ScratchTextView.guttersEnabled, forKey: "gutters")
+        applyTheme(ScratchTextView.currentTheme)
+    }
+
+    func applyTheme(_ theme: Theme) {
+        ScratchTextView.currentTheme = theme
+        UserDefaults.standard.set(theme.rawValue, forKey: "theme")
+
+        // Natural is inherently a light look — pin the window chrome to
+        // light appearance so scrollbars and dialogs match the paper.
+        window.appearance = theme == .natural ? NSAppearance(named: .aqua) : nil
+        textView.enclosingScrollView?.backgroundColor =
+            ScratchTextView.guttersEnabled ? theme.gutter : theme.background
+        textView.insertionPointColor = theme.caret
+        textView.needsDisplay = true
+
+        // Recolor what's already on the page, respecting scratch dimming.
+        if let storage = textView.textStorage, storage.length > 0 {
+            let full = NSRange(location: 0, length: storage.length)
+            storage.beginEditing()
+            storage.enumerateAttribute(.strikethroughStyle, in: full) { value, range, _ in
+                let struck = ((value as? Int) ?? 0) != 0
+                storage.addAttribute(.foregroundColor, value: struck ? theme.dimInk : theme.ink, range: range)
+            }
+            storage.endEditing()
+        }
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(selectSystemTheme(_:)) {
+            menuItem.state = ScratchTextView.currentTheme == .system ? .on : .off
+        } else if menuItem.action == #selector(selectNaturalTheme(_:)) {
+            menuItem.state = ScratchTextView.currentTheme == .natural ? .on : .off
+        } else if menuItem.action == #selector(toggleGutters(_:)) {
+            menuItem.title = ScratchTextView.guttersEnabled ? "Hide Gutters" : "Show Gutters"
+        }
+        return true
     }
 
     // MARK: Autosave
@@ -304,7 +515,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func saveDocument(_ sender: Any?) {
         let markdown = UTType(filenameExtension: "md") ?? .plainText
         let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd HH.mm"
+        formatter.dateFormat = "yyyy-MM-dd_HH-mm"
         let panel = NSSavePanel()
         panel.nameFieldStringValue = formatter.string(from: Date()) + ".md"
         panel.allowedContentTypes = [markdown]
@@ -342,6 +553,18 @@ func makeMainMenu() -> NSMenu {
     editMenu.addItem(withTitle: "Start Dictation…", action: Selector(("startDictation:")), keyEquivalent: "")
     editMenuItem.submenu = editMenu
     mainMenu.addItem(editMenuItem)
+
+    let viewMenuItem = NSMenuItem()
+    let viewMenu = NSMenu(title: "View")
+    let themeItem = NSMenuItem(title: "Theme", action: nil, keyEquivalent: "")
+    let themeMenu = NSMenu(title: "Theme")
+    themeMenu.addItem(withTitle: "System", action: #selector(AppDelegate.selectSystemTheme(_:)), keyEquivalent: "")
+    themeMenu.addItem(withTitle: "Natural", action: #selector(AppDelegate.selectNaturalTheme(_:)), keyEquivalent: "")
+    themeItem.submenu = themeMenu
+    viewMenu.addItem(themeItem)
+    viewMenu.addItem(withTitle: "Hide Gutters", action: #selector(AppDelegate.toggleGutters(_:)), keyEquivalent: "")
+    viewMenuItem.submenu = viewMenu
+    mainMenu.addItem(viewMenuItem)
 
     return mainMenu
 }
