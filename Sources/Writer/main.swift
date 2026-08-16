@@ -562,7 +562,7 @@ func makeMainMenu() -> NSMenu {
     themeMenu.addItem(withTitle: "Natural", action: #selector(AppDelegate.selectNaturalTheme(_:)), keyEquivalent: "")
     themeItem.submenu = themeMenu
     viewMenu.addItem(themeItem)
-    viewMenu.addItem(withTitle: "Show Gutters", action: #selector(AppDelegate.toggleGutters(_:)), keyEquivalent: "")
+    viewMenu.addItem(withTitle: "Toggle Gutters", action: #selector(AppDelegate.toggleGutters(_:)), keyEquivalent: "")
     viewMenuItem.submenu = viewMenu
     mainMenu.addItem(viewMenuItem)
 
