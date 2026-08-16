@@ -363,7 +363,7 @@ func makeTextView() -> (scrollView: NSScrollView, textView: ScratchTextView) {
 
 // MARK: - App delegate
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     var window: NSWindow!
     var textView: ScratchTextView!
     let forwardOnly = ForwardOnlyDelegate()
@@ -461,7 +461,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else if menuItem.action == #selector(selectNaturalTheme(_:)) {
             menuItem.state = ScratchTextView.currentTheme == .natural ? .on : .off
         } else if menuItem.action == #selector(toggleGutters(_:)) {
-            menuItem.state = ScratchTextView.guttersEnabled ? .on : .off
+            menuItem.title = ScratchTextView.guttersEnabled ? "Hide Gutters" : "Show Gutters"
         }
         return true
     }
@@ -562,7 +562,7 @@ func makeMainMenu() -> NSMenu {
     themeMenu.addItem(withTitle: "Natural", action: #selector(AppDelegate.selectNaturalTheme(_:)), keyEquivalent: "")
     themeItem.submenu = themeMenu
     viewMenu.addItem(themeItem)
-    viewMenu.addItem(withTitle: "Toggle Gutters", action: #selector(AppDelegate.toggleGutters(_:)), keyEquivalent: "")
+    viewMenu.addItem(withTitle: "Hide Gutters", action: #selector(AppDelegate.toggleGutters(_:)), keyEquivalent: "")
     viewMenuItem.submenu = viewMenu
     mainMenu.addItem(viewMenuItem)
 
